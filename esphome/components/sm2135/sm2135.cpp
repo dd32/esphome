@@ -31,7 +31,7 @@ static const uint8_t SM2135_50MA = 0x08;
 static const uint8_t SM2135_55MA = 0x09;
 static const uint8_t SM2135_60MA = 0x0A;
 
-static const uint8_t SM2135_CURRENT = (SM2135_20MA << 4) | SM2135_10MA;
+static const uint8_t SM2135_CURRENT = (SM2135_20MA << 4) | SM2135_30MA;
 
 void SM2135::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SM2135OutputComponent...");
