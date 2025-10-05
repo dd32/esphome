@@ -82,6 +82,7 @@
 #define USE_LVGL_TILEVIEW
 #define USE_LVGL_TOUCHSCREEN
 #define USE_MDNS
+#define MDNS_SERVICE_COUNT 3
 #define USE_MEDIA_PLAYER
 #define USE_NEXTION_TFT_UPLOAD
 #define USE_NUMBER
@@ -115,6 +116,7 @@
 #define USE_API_NOISE
 #define USE_API_PLAINTEXT
 #define USE_API_SERVICES
+#define API_MAX_SEND_QUEUE 8
 #define USE_MD5
 #define USE_SHA256
 #define USE_MQTT
