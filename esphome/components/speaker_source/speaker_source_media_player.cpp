@@ -5,6 +5,8 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
+
 namespace esphome::speaker_source {
 
 static constexpr uint32_t MEDIA_CONTROLS_QUEUE_LENGTH = 20;
@@ -126,6 +128,7 @@ void SpeakerSourceMediaPlayer::handle_play_uri_request_(uint8_t pipeline, const 
   // Smart source is requesting the player to play a different URI
   auto call = this->make_call();
   call.set_media_url(uri);
+  call.set_announcement(pipeline == ANNOUNCEMENT_PIPELINE);
   call.perform();
 }
 
@@ -207,7 +210,7 @@ size_t SpeakerSourceMediaPlayer::handle_media_output_(uint8_t pipeline, media_so
 }
 
 // THREAD CONTEXT: Called from main loop (loop)
-media_player::MediaPlayerState SpeakerSourceMediaPlayer::get_media_pipeline_state_(
+media_player::MediaPlayerState SpeakerSourceMediaPlayer::get_source_state_(
     media_source::MediaSource *source, bool playlist_active, media_player::MediaPlayerState old_state) const {
   if (source != nullptr) {
     switch (source->get_state()) {
@@ -216,7 +219,7 @@ media_player::MediaPlayerState SpeakerSourceMediaPlayer::get_media_pipeline_stat
       case media_source::MediaSourceState::PAUSED:
         return media_player::MEDIA_PLAYER_STATE_PAUSED;
       case media_source::MediaSourceState::ERROR:
-        ESP_LOGE(TAG, "Source error");
+        ESP_LOGE(TAG, "Media source error");
         return media_player::MEDIA_PLAYER_STATE_IDLE;
       case media_source::MediaSourceState::IDLE:
       default:
@@ -235,16 +238,47 @@ void SpeakerSourceMediaPlayer::loop() {
   // Process queued control commands
   this->process_control_queue_();
 
-  // Update state based on active sources
+  // Update state based on active sources - announcement pipeline takes priority
   media_player::MediaPlayerState old_state = this->state;
 
+  PipelineContext &ann_ps = this->pipelines_[ANNOUNCEMENT_PIPELINE];
   PipelineContext &media_ps = this->pipelines_[MEDIA_PIPELINE];
 
   // Check playlist state to detect transitions between items
+  bool announcement_playlist_active = (ann_ps.playlist_index < ann_ps.playlist.size()) ||
+                                      (ann_ps.repeat_mode != REPEAT_OFF && !ann_ps.playlist.empty());
   bool media_playlist_active = (media_ps.playlist_index < media_ps.playlist.size()) ||
                                (media_ps.repeat_mode != REPEAT_OFF && !media_ps.playlist.empty());
 
-  this->state = this->get_media_pipeline_state_(media_ps.active_source, media_playlist_active, old_state);
+  // Check announcement pipeline first
+  media_source::MediaSource *announcement_source = ann_ps.active_source;
+  if (announcement_source != nullptr) {
+    media_source::MediaSourceState announcement_state = announcement_source->get_state();
+    if (announcement_state != media_source::MediaSourceState::IDLE) {
+      // Announcement is active - announcements take priority and never report PAUSED
+      switch (announcement_state) {
+        case media_source::MediaSourceState::PLAYING:
+        case media_source::MediaSourceState::PAUSED:  // Treat paused announcements as announcing
+          this->state = media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+          break;
+        case media_source::MediaSourceState::ERROR:
+          ESP_LOGE(TAG, "Announcement source error");
+          // Fall through to media pipeline state
+          this->state = this->get_source_state_(media_ps.active_source, media_playlist_active, old_state);
+          break;
+        default:
+          break;
+      }
+    } else {
+      // Announcement source is idle, fall through to media pipeline
+      this->state = this->get_source_state_(media_ps.active_source, media_playlist_active, old_state);
+    }
+  } else if (announcement_playlist_active && old_state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING) {
+    this->state = media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+  } else {
+    // No active announcement, check media pipeline
+    this->state = this->get_source_state_(media_ps.active_source, media_playlist_active, old_state);
+  }
 
   if (this->state != old_state) {
     this->publish_state();
@@ -355,7 +389,7 @@ void SpeakerSourceMediaPlayer::set_playlist_delay_ms(uint8_t pipeline, uint32_t 
 // The timeout callback also runs on the main loop.
 void SpeakerSourceMediaPlayer::queue_play_current_(uint8_t pipeline, uint32_t delay_ms) {
   if (delay_ms > 0) {
-    this->set_timeout(PipelineContext::TIMEOUT_IDS[pipeline], delay_ms,
+    this->set_timeout(PIPELINE_TIMEOUT_IDS[pipeline], delay_ms,
                       [this, pipeline]() { this->queue_command_(MediaPlayerControlCommand::PLAY_CURRENT, pipeline); });
   } else {
     this->queue_command_(MediaPlayerControlCommand::PLAY_CURRENT, pipeline);
@@ -364,7 +398,7 @@ void SpeakerSourceMediaPlayer::queue_play_current_(uint8_t pipeline, uint32_t de
 
 // THREAD CONTEXT: Called from main loop (loop)
 void SpeakerSourceMediaPlayer::process_control_queue_() {
-  MediaPlayerControlCommand control_command;
+  MediaPlayerControlCommand control_command{};
 
   // Use peek to check command without removing it
   if (xQueuePeek(this->media_control_command_queue_, &control_command, 0) != pdTRUE) {
@@ -381,9 +415,10 @@ void SpeakerSourceMediaPlayer::process_control_queue_() {
   switch (control_command.type) {
     case MediaPlayerControlCommand::PLAY_URI: {
       // Always use our local playlist to start playback
-      this->cancel_timeout(PipelineContext::TIMEOUT_IDS[pipeline]);
+      this->cancel_timeout(PIPELINE_TIMEOUT_IDS[pipeline]);
       ps.playlist.clear();
-      ps.playlist_index = 0;  // Reset index
+      ps.shuffle_indices.clear();  // Clear shuffle when starting fresh playlist
+      ps.playlist_index = 0;       // Reset index
       ps.playlist.push_back(*control_command.data.uri);
 
       // Queue PLAY_CURRENT to initiate playback
@@ -395,6 +430,11 @@ void SpeakerSourceMediaPlayer::process_control_queue_() {
     case MediaPlayerControlCommand::ENQUEUE_URI: {
       // Always add to our local playlist
       ps.playlist.push_back(*control_command.data.uri);
+
+      // If shuffle is active, add the new item to the end of the shuffle order
+      if (!ps.shuffle_indices.empty()) {
+        ps.shuffle_indices.push_back(ps.playlist.size() - 1);
+      }
 
       // If nothing is playing and no upcoming items are queued, start the new item.
       bool nothing_playing =
@@ -425,9 +465,10 @@ void SpeakerSourceMediaPlayer::process_control_queue_() {
     }
 
     case MediaPlayerControlCommand::PLAY_CURRENT: {
-      // Play the item at current playlist index
+      // Play the item at current playlist index (mapped through shuffle if active)
       if (ps.playlist_index < ps.playlist.size()) {
-        command_executed = this->try_execute_play_uri_(ps.playlist[ps.playlist_index], pipeline);
+        size_t actual_position = this->get_playlist_position_(pipeline);
+        command_executed = this->try_execute_play_uri_(ps.playlist[actual_position], pipeline);
       } else {
         command_executed = true;  // Index out of bounds or empty playlist
       }
@@ -519,8 +560,9 @@ void SpeakerSourceMediaPlayer::handle_player_command_(media_player::MediaPlayerC
 
     case media_player::MEDIA_PLAYER_COMMAND_STOP: {
       if (!has_internal_playlist) {
-        this->cancel_timeout(PipelineContext::TIMEOUT_IDS[pipeline]);
+        this->cancel_timeout(PIPELINE_TIMEOUT_IDS[pipeline]);
         ps.playlist.clear();
+        ps.shuffle_indices.clear();
         ps.playlist_index = 0;
       }
       if (target_source != nullptr) {
@@ -531,7 +573,7 @@ void SpeakerSourceMediaPlayer::handle_player_command_(media_player::MediaPlayerC
 
     case media_player::MEDIA_PLAYER_COMMAND_NEXT: {
       if (!has_internal_playlist) {
-        this->cancel_timeout(PipelineContext::TIMEOUT_IDS[pipeline]);
+        this->cancel_timeout(PIPELINE_TIMEOUT_IDS[pipeline]);
         if (ps.playlist_index + 1 < ps.playlist.size()) {
           ps.playlist_index++;
           this->queue_command_(MediaPlayerControlCommand::PLAY_CURRENT, pipeline);
@@ -547,7 +589,7 @@ void SpeakerSourceMediaPlayer::handle_player_command_(media_player::MediaPlayerC
 
     case media_player::MEDIA_PLAYER_COMMAND_PREVIOUS: {
       if (!has_internal_playlist) {
-        this->cancel_timeout(PipelineContext::TIMEOUT_IDS[pipeline]);
+        this->cancel_timeout(PIPELINE_TIMEOUT_IDS[pipeline]);
         if (ps.playlist_index > 0) {
           ps.playlist_index--;
           this->queue_command_(MediaPlayerControlCommand::PLAY_CURRENT, pipeline);
@@ -587,23 +629,41 @@ void SpeakerSourceMediaPlayer::handle_player_command_(media_player::MediaPlayerC
 
     case media_player::MEDIA_PLAYER_COMMAND_CLEAR_PLAYLIST: {
       if (!has_internal_playlist) {
-        this->cancel_timeout(PipelineContext::TIMEOUT_IDS[pipeline]);
+        this->cancel_timeout(PIPELINE_TIMEOUT_IDS[pipeline]);
         if (ps.playlist_index < ps.playlist.size()) {
-          ps.playlist[0] = std::move(ps.playlist[ps.playlist_index]);
+          size_t actual_position = this->get_playlist_position_(pipeline);
+          ps.playlist[0] = std::move(ps.playlist[actual_position]);
           ps.playlist.resize(1);
           ps.playlist_index = 0;
         } else {
           ps.playlist.clear();
           ps.playlist_index = 0;
         }
+        ps.shuffle_indices.clear();
       } else if (target_source != nullptr) {
         target_source->handle_command(media_source::MediaSourceCommand::CLEAR_PLAYLIST);
       }
       break;
     }
 
+    case media_player::MEDIA_PLAYER_COMMAND_SHUFFLE:
+      if (!has_internal_playlist) {
+        this->shuffle_playlist_(pipeline);
+      } else if (target_source != nullptr) {
+        target_source->handle_command(media_source::MediaSourceCommand::SHUFFLE);
+      }
+      break;
+
+    case media_player::MEDIA_PLAYER_COMMAND_UNSHUFFLE:
+      if (!has_internal_playlist) {
+        this->unshuffle_playlist_(pipeline);
+      } else if (target_source != nullptr) {
+        target_source->handle_command(media_source::MediaSourceCommand::UNSHUFFLE);
+      }
+      break;
+
     default:
-      // TURN_ON, TURN_OFF, ENQUEUE (handled separately with URL), SHUFFLE/UNSHUFFLE (PR3) are no-ops
+      // TURN_ON, TURN_OFF, ENQUEUE (handled separately with URL) are no-ops
       break;
   }
 }
@@ -616,8 +676,24 @@ void SpeakerSourceMediaPlayer::control(const media_player::MediaPlayerCall &call
     return;
   }
 
-  MediaPlayerControlCommand control_command;
-  control_command.pipeline = MEDIA_PIPELINE;
+  MediaPlayerControlCommand control_command{};
+
+  // Determine which pipeline to use based on announcement flag, falling back if the preferred pipeline
+  // is not configured
+  auto announcement = call.get_announcement();
+  if (announcement.has_value() && announcement.value()) {
+    if (this->pipelines_[ANNOUNCEMENT_PIPELINE].is_configured()) {
+      control_command.pipeline = ANNOUNCEMENT_PIPELINE;
+    } else {
+      control_command.pipeline = MEDIA_PIPELINE;
+    }
+  } else {
+    if (this->pipelines_[MEDIA_PIPELINE].is_configured()) {
+      control_command.pipeline = MEDIA_PIPELINE;
+    } else {
+      control_command.pipeline = ANNOUNCEMENT_PIPELINE;
+    }
+  }
 
   auto media_url = call.get_media_url();
   if (media_url.has_value()) {
@@ -764,6 +840,58 @@ void SpeakerSourceMediaPlayer::set_volume_(float volume, bool publish) {
   }
 
   this->defer([this, volume]() { this->volume_trigger_.trigger(volume); });
+}
+
+size_t SpeakerSourceMediaPlayer::get_playlist_position_(uint8_t pipeline) const {
+  const PipelineContext &ps = this->pipelines_[pipeline];
+
+  if (ps.shuffle_indices.empty() || ps.playlist_index >= ps.shuffle_indices.size()) {
+    return ps.playlist_index;
+  }
+  return ps.shuffle_indices[ps.playlist_index];
+}
+
+void SpeakerSourceMediaPlayer::shuffle_playlist_(uint8_t pipeline) {
+  PipelineContext &ps = this->pipelines_[pipeline];
+
+  if (ps.playlist.size() <= 1) {
+    ps.shuffle_indices.clear();
+    return;
+  }
+
+  // Capture current actual position BEFORE modifying shuffle_indices
+  size_t current_actual = this->get_playlist_position_(pipeline);
+
+  // Build indices vector
+  ps.shuffle_indices.resize(ps.playlist.size());
+  for (size_t i = 0; i < ps.playlist.size(); i++) {
+    ps.shuffle_indices[i] = i;
+  }
+
+  // Fisher-Yates shuffle using ESPHome's random helper
+  for (size_t i = ps.shuffle_indices.size() - 1; i > 0; i--) {
+    size_t j = random_uint32() % (i + 1);
+    std::swap(ps.shuffle_indices[i], ps.shuffle_indices[j]);
+  }
+
+  // Move current track to current position (so playback continues seamlessly)
+  if (ps.playlist_index < ps.shuffle_indices.size()) {
+    for (size_t i = 0; i < ps.shuffle_indices.size(); i++) {
+      if (ps.shuffle_indices[i] == current_actual) {
+        std::swap(ps.shuffle_indices[i], ps.shuffle_indices[ps.playlist_index]);
+        break;
+      }
+    }
+  }
+}
+
+void SpeakerSourceMediaPlayer::unshuffle_playlist_(uint8_t pipeline) {
+  PipelineContext &ps = this->pipelines_[pipeline];
+
+  if (!ps.shuffle_indices.empty() && ps.playlist_index < ps.shuffle_indices.size()) {
+    ps.playlist_index = ps.shuffle_indices[ps.playlist_index];
+  }
+  ps.shuffle_indices.clear();
 }
 
 }  // namespace esphome::speaker_source
