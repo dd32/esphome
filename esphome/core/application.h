@@ -487,9 +487,6 @@ class Application {
 #ifdef USE_HOST
   std::vector<int> socket_fds_;  // Vector of all monitored socket file descriptors
 #endif
-#ifdef USE_HOST
-  int wake_socket_fd_{-1};  // Shared wake notification socket for waking main loop from tasks
-#endif
 
   // StringRef members (8 bytes each: pointer + size)
   StringRef name_;
@@ -505,7 +502,8 @@ class Application {
 #endif
 
 #ifdef USE_HOST
-  int max_fd_{-1};  // Highest file descriptor number for select()
+  int max_fd_{-1};          // Highest file descriptor number for select()
+  int wake_socket_fd_{-1};  // Shared wake notification socket for waking main loop from tasks
 #endif
 
   // 2-byte members (grouped together for alignment)
@@ -522,9 +520,7 @@ class Application {
 
 #ifdef USE_HOST
   bool socket_fds_changed_{false};  // Flag to rebuild base_read_fds_ when socket_fds_ changes
-#endif
 
-#ifdef USE_HOST
   // Variable-sized members (not needed with fast select — is_socket_ready_ reads rcvevent directly)
   fd_set read_fds_{};       // Working fd_set: populated by select()
   fd_set base_read_fds_{};  // Cached fd_set rebuilt only when socket_fds_ changes
@@ -752,18 +748,6 @@ inline void ESPHOME_ALWAYS_INLINE Application::loop() {
 // Inline yield_with_select_ for all paths except the select() fallback
 #ifndef USE_HOST
 inline void ESPHOME_ALWAYS_INLINE Application::yield_with_select_(uint32_t delay_ms) {
-#ifdef USE_LWIP_FAST_SELECT
-  // Fast path (ESP32/LibreTiny): FreeRTOS task notifications posted by the lwip
-  // event_callback wrapper (see lwip_fast_select.c) are the single source of truth for
-  // socket wake-ups. Every NETCONN_EVT_RCVPLUS posts an xTaskNotifyGive, so any notification
-  // that lands between wakes keeps the counter non-zero (next ulTaskNotifyTake returns
-  // immediately) or wakes a blocked Take directly. Additional wake sources:
-  // wake_loop_threadsafe() from background tasks, and the delay_ms timeout.
-  if (delay_ms == 0) [[unlikely]] {
-    yield();
-    return;
-  }
-#endif
   esphome::internal::wakeable_delay(delay_ms);
 }
 #endif  // !USE_HOST
