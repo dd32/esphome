@@ -48,6 +48,8 @@ from esphome.const import (
     CONF_WEB_SERVER,
     CONF_WIFI,
     ENV_NOGITIGNORE,
+    KEY_ESP32,
+    KEY_VARIANT,
     SECRETS_FILES,
     Toolchain,
 )
@@ -630,27 +632,9 @@ def run_miniterm(config: ConfigType, port: str, args) -> int:
         return 1
     _LOGGER.info("Starting log output from %s with baud rate %s", port, baud_rate)
 
-    # Stacktrace analysis is optional; a broken platform import must not
-    # stop serial log streaming, but it is a real breakage and must not
-    # masquerade as an ordinary capability gap.
-    try:
-        process_stacktrace = platform_hooks.get_platform_hook(
-            CORE.target_platform, "process_stacktrace"
-        )
-    except ImportError as err:
-        _LOGGER.debug("Stacktrace analyzer import failed", exc_info=True)
-        _LOGGER.warning(
-            'Stacktrace analysis is unavailable: analyzer for target platform "%s" failed to import: %s',
-            CORE.target_platform,
-            err,
-        )
-        process_stacktrace = None
-    else:
-        if process_stacktrace is None:
-            _LOGGER.info(
-                'Stacktrace analysis is unavailable: no compatible analyzer found for target platform "%s".',
-                CORE.target_platform,
-            )
+    # Stacktrace analysis is optional; platform_hooks owns resolution
+    # and the user-facing messages.
+    process_stacktrace = platform_hooks.get_stacktrace_handler(CORE.target_platform)
 
     backtrace_state = False
     ser = serial.Serial()
@@ -941,9 +925,10 @@ def upload_using_esptool(
 
     mcu = "esp8266"
     if CORE.is_esp32:
-        from esphome.components.esp32 import get_esp32_variant
-
-        mcu = get_esp32_variant().lower()
+        # Same lookup as esp32.get_esp32_variant(), read directly so the
+        # serial upload path does not import the esp32 package; both the
+        # validator and the warm-cache apply_to_core populate this key.
+        mcu = CORE.data[KEY_ESP32][KEY_VARIANT].lower()
 
     line_callbacks: list[Callable[[str], str | None]] = []
     if (
