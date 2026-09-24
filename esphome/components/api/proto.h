@@ -170,40 +170,43 @@ class ProtoVarInt {
 class ProtoMessage;
 class ProtoSize;
 
-class ProtoLengthDelimited {
+/// Case label for decode_field(): the wire tag of a field, so a field that arrives with another wire
+/// type matches no case.
+constexpr uint32_t proto_tag(uint32_t field_id, uint32_t wire_type) { return (field_id << 3) | wire_type; }
+
+/// One decoded field: the payload pointer and a scalar holding the varint or fixed32 value, or the
+/// length of a length-delimited field. The wire type in the tag says which applies; accessors do not check.
+class ProtoFieldValue {
  public:
-  explicit ProtoLengthDelimited(const uint8_t *value, size_t length) : value_(value), length_(length) {}
-  std::string as_string() const { return std::string(reinterpret_cast<const char *>(this->value_), this->length_); }
+  ProtoFieldValue(const uint8_t *data, proto_varint_value_t scalar) : data_(data), scalar_(scalar) {}
 
-  // Direct access to raw data without string allocation
-  const uint8_t *data() const { return this->value_; }
-  size_t size() const { return this->length_; }
+  proto_varint_value_t as_varint() const { return this->scalar_; }
+  // A bool is sent as 0 or 1, so the low word is enough and saves a second compare with 64 bit varints
+  bool as_bool() const { return static_cast<uint32_t>(this->scalar_) != 0; }
 
-  /// Decode the length-delimited data into a message instance.
+  // Length-delimited accessors
+  const uint8_t *data() const { return this->data_; }
+  size_t size() const { return static_cast<size_t>(this->scalar_); }
+  std::string as_string() const { return std::string(reinterpret_cast<const char *>(this->data_), this->size()); }
+  /// Decode the length-delimited payload into a message instance.
   /// Template preserves concrete type so decode() resolves statically.
-  template<typename T> void decode_to_message(T &msg) const;
+  template<typename T> void decode_to_message(T &msg) const { msg.decode(this->data_, this->size()); }
 
- protected:
-  const uint8_t *const value_;
-  const size_t length_;
-};
-
-class Proto32Bit {
- public:
-  explicit Proto32Bit(uint32_t value) : value_(value) {}
-  uint32_t as_fixed32() const { return this->value_; }
-  int32_t as_sfixed32() const { return static_cast<int32_t>(this->value_); }
+  // Fixed32 accessors
+  uint32_t as_fixed32() const { return static_cast<uint32_t>(this->scalar_); }
+  int32_t as_sfixed32() const { return static_cast<int32_t>(this->as_fixed32()); }
   float as_float() const {
     union {
       uint32_t raw;
       float value;
     } s{};
-    s.raw = this->value_;
+    s.raw = this->as_fixed32();
     return s.value;
   }
 
- protected:
-  const uint32_t value_;
+ private:
+  const uint8_t *data_;
+  proto_varint_value_t scalar_;
 };
 
 // NOTE: Proto64Bit class removed - wire type 1 (64-bit fixed) not supported
@@ -255,7 +258,7 @@ class ProtoWriteBuffer {
    *
    * Following https://protobuf.dev/programming-guides/encoding/#structure
    */
-  void encode_field_raw(uint32_t field_id, uint32_t type) { this->encode_varint_raw((field_id << 3) | type); }
+  void encode_field_raw(uint32_t field_id, uint32_t type) { this->encode_varint_raw(proto_tag(field_id, type)); }
   /// Single-pass encode for repeated submessage elements.
   /// Thin template wrapper; all buffer work is in the non-template core.
   template<typename T> void encode_sub_message(uint32_t field_id, const T &value);
@@ -385,7 +388,7 @@ class ProtoEncode {
   }
   [[nodiscard]] static inline uint8_t *ESPHOME_ALWAYS_INLINE
   encode_field_raw(uint8_t *__restrict__ pos PROTO_ENCODE_DEBUG_PARAM, uint32_t field_id, uint32_t type) {
-    return encode_varint_raw(pos PROTO_ENCODE_DEBUG_ARG, (field_id << 3) | type);
+    return encode_varint_raw(pos PROTO_ENCODE_DEBUG_ARG, proto_tag(field_id, type));
   }
   /// Write a single precomputed tag byte. Tag must be < 128.
   [[nodiscard]] static inline uint8_t *ESPHOME_ALWAYS_INLINE
@@ -695,11 +698,12 @@ class DumpBuffer {
 
 class ProtoMessage {
  public:
-  // Non-virtual defaults for messages with no fields.
-  // Concrete message classes hide these with their own implementations.
-  // All call sites use templates to preserve the concrete type, so virtual
-  // dispatch is not needed. This eliminates per-message vtable entries for
-  // encode/calculate_size, saving ~1.3 KB of flash across all message types.
+  // Non-virtual defaults for messages with no fields; generated classes hide all four. The
+  // static encode_msg/calc_size_msg take const void * so &T::encode_msg needs no thunk.
+  static uint8_t *encode_msg(const void *self, ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) {
+    return buffer.get_pos();
+  }
+  static uint32_t calc_size_msg(const void *self) { return 0; }
   uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const { return buffer.get_pos(); }
   uint32_t calculate_size() const { return 0; }
 #ifdef HAS_PROTO_MESSAGE_DUMP
@@ -734,10 +738,10 @@ class ProtoDecodableMessage : public ProtoMessage {
 
  protected:
   ~ProtoDecodableMessage() = default;
-  virtual bool decode_varint(uint32_t field_id, proto_varint_value_t value) { return false; }
-  virtual bool decode_length(uint32_t field_id, ProtoLengthDelimited value) { return false; }
-  virtual bool decode_32bit(uint32_t field_id, Proto32Bit value) { return false; }
-  // NOTE: decode_64bit removed - wire type 1 not supported
+  /// Store one decoded field; \p scalar is the varint or fixed32 value, or the length of the
+  /// length-delimited payload at \p data. An unknown field or wrong wire type matches no case and is skipped.
+  /// Three register arguments keep the decode loop free of spills.
+  virtual void decode_field(uint32_t tag, const uint8_t *data, proto_varint_value_t scalar) {}
 };
 
 class ProtoSize {
@@ -863,7 +867,7 @@ class ProtoSize {
    * @return The number of bytes needed to encode the field ID and wire type
    */
   static constexpr uint32_t field(uint32_t field_id, uint32_t type) {
-    uint32_t tag = (field_id << 3) | (type & WIRE_TYPE_MASK);
+    uint32_t tag = proto_tag(field_id, type & WIRE_TYPE_MASK);
     return varint(tag);
   }
 
@@ -947,24 +951,14 @@ class ProtoSize {
 
 // Implementation of methods that depend on ProtoSize being fully defined
 
-// Encode thunk — converts void* back to concrete type for direct encode() call
-template<typename T> uint8_t *proto_encode_msg(const void *msg, ProtoWriteBuffer &buf PROTO_ENCODE_DEBUG_PARAM) {
-  return static_cast<const T *>(msg)->encode(buf PROTO_ENCODE_DEBUG_ARG);
-}
-
 // Thin template wrapper; delegates to non-template core in proto.cpp.
 template<typename T> inline void ProtoWriteBuffer::encode_sub_message(uint32_t field_id, const T &value) {
-  this->encode_sub_message(field_id, &value, &proto_encode_msg<T>);
+  this->encode_sub_message(field_id, &value, &T::encode_msg);
 }
 
 // Thin template wrapper; delegates to non-template core.
 template<typename T> inline void ProtoWriteBuffer::encode_optional_sub_message(uint32_t field_id, const T &value) {
-  this->encode_optional_sub_message(field_id, value.calculate_size(), &value, &proto_encode_msg<T>);
-}
-
-// Template decode_to_message - preserves concrete type so decode() resolves statically
-template<typename T> void ProtoLengthDelimited::decode_to_message(T &msg) const {
-  msg.decode(this->value_, this->length_);
+  this->encode_optional_sub_message(field_id, T::calc_size_msg(&value), &value, &T::encode_msg);
 }
 
 template<typename T> const char *proto_enum_to_string(T value);
