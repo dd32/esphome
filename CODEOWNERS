@@ -101,6 +101,7 @@ esphome/components/bmp581_i2c/* @danielkent-net @kahrendt
 esphome/components/bmp581_spi/* @danielkent-net @kahrendt
 esphome/components/bp1658cj/* @Cossid
 esphome/components/bp5758d/* @Cossid
+esphome/components/bq25186/* @Rapsssito
 esphome/components/bq27220/* @rggammon
 esphome/components/bridge/* @kbx81
 esphome/components/bthome_mithermometer/* @nagyrobi
@@ -202,6 +203,7 @@ esphome/components/exponential_moving_average/* @clydebarrow
 esphome/components/exposure_notifications/* @OttoWinter
 esphome/components/ezo/* @ssieb
 esphome/components/ezo_pmp/* @carlos-sarmiento
+esphome/components/ezsp_proxy_tap/* @kbx81 @puddly
 esphome/components/factory_reset/* @anatoly-savchenkov
 esphome/components/fastled_base/* @OttoWinter
 esphome/components/feedback/* @ianchi
@@ -342,7 +344,9 @@ esphome/components/m5stack_8angle/* @rnauber
 esphome/components/mapping/* @clydebarrow
 esphome/components/matrix_keypad/* @ssieb
 esphome/components/max17043/* @blacknell
+esphome/components/max17048/* @B48D81EFCC
 esphome/components/max31865/* @DAVe3283
+esphome/components/max31888/* @JiriPrchal
 esphome/components/max44009/* @berfenger
 esphome/components/max6956/* @looping40
 esphome/components/max7219digit/* @rspaargaren
@@ -412,6 +416,8 @@ esphome/components/noblex/* @AGalfra
 esphome/components/noise/* @esphome/core
 esphome/components/npi19/* @bakerkj
 esphome/components/nrf52/* @tomaszduda23
+esphome/components/ns2009/* @tchilov
+esphome/components/ns2009/touchscreen/* @tchilov
 esphome/components/number/* @esphome/core
 esphome/components/one_wire/* @ssieb
 esphome/components/online_image/* @clydebarrow @guillempages
@@ -466,6 +472,7 @@ esphome/components/rc522/* @glmnet
 esphome/components/rc522_i2c/* @glmnet
 esphome/components/rc522_spi/* @glmnet
 esphome/components/rd03d/* @jasstrong
+esphome/components/renogy_inverter_ble/* @emilioaray-dev
 esphome/components/resampler/speaker/* @kahrendt
 esphome/components/restart/* @esphome/core
 esphome/components/rf_bridge/* @jesserockz
@@ -581,6 +588,7 @@ esphome/components/t6615/* @tylermenezes
 esphome/components/tas2780/* @remcom
 esphome/components/tas58xx/* @mrtoy-me @remcom
 esphome/components/tc74/* @sethgirvan
+esphome/components/tca8418/* @zebble
 esphome/components/tca9548a/* @andreashergert1984
 esphome/components/tca9555/* @mobrembski
 esphome/components/tcl112/* @glmnet
@@ -598,6 +606,7 @@ esphome/components/thermopro_ble/* @sittner
 esphome/components/thermostat/* @kbx81
 esphome/components/time/* @esphome/core
 esphome/components/tinyusb/* @kbx81
+esphome/components/tinyusb_keyboard/* @frederikbolding
 esphome/components/tlc5947/* @rnauber
 esphome/components/tlc5971/* @IJIJI
 esphome/components/tm1621/* @Philippe12
