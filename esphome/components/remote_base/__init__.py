@@ -953,16 +953,22 @@ MAGIQUEST_SCHEMA = cv.Schema(
     }
 )
 
+# A wand_id of 0 matches any wand. Magnitude is still accepted but not matched on.
+MAGIQUEST_BINARY_SENSOR_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_WAND_ID, default=0): cv.hex_uint32_t,
+        cv.Optional(CONF_MAGNITUDE): cv.hex_uint16_t,
+    }
+)
 
-@register_binary_sensor("magiquest", MagiQuestBinarySensor, MAGIQUEST_SCHEMA)
+
+@register_binary_sensor(
+    "magiquest", MagiQuestBinarySensor, MAGIQUEST_BINARY_SENSOR_SCHEMA
+)
 def magiquest_binary_sensor(var, config):
     cg.add(
         var.set_data(
-            cg.StructInitializer(
-                MagiQuestData,
-                ("magnitude", config[CONF_MAGNITUDE]),
-                ("wand_id", config[CONF_WAND_ID]),
-            )
+            cg.StructInitializer(MagiQuestData, ("wand_id", config[CONF_WAND_ID]))
         )
     )
 
@@ -1070,7 +1076,8 @@ NEC_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ADDRESS): cv.hex_uint16_t,
         cv.Required(CONF_COMMAND): cv.hex_uint16_t,
-        cv.Optional(CONF_COMMAND_REPEATS, default=1): cv.uint16_t,
+        # Non-RMT transmitters hold an interrupt lock for the whole send, ~108 ms per extra repeat
+        cv.Optional(CONF_COMMAND_REPEATS, default=1): cv.int_range(min=1, max=10),
     }
 )
 
