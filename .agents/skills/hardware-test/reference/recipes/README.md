@@ -42,6 +42,7 @@ One file per component, named after it:
 - [`xiaomi_ble.md`](xiaomi_ble.md): Xiaomi, ATC and PVVX parsing by injecting scan results into the ESP32 tracker or advertising them from a second ESP32, real AES-CCM frames, duplicate filter model
 - [`ble_terminate.md`](ble_terminate.md): proxy disconnect against a peer with peripheral latency
 - [`i2c_slave.md`](i2c_slave.md): fake I2C slave on a D1 mini, ESP32 hardware master as the control
+- [`fake_i2c.md`](fake_i2c.md): fake I2C devices with no chip: in-firmware buses for many drivers, a Pico 2 W BME280/BMP280 target, a DS2482-800 simulator, NACK injection for vl53l0x
 - [`gpio_hold.md`](gpio_hold.md): GPIO hold through the ISR pin API, pad read back with no wiring, per chip pin notes
 - [`ble_event_inject.md`](ble_event_inject.md): made up GAP and GATTC events fed into the ESP32 BLE handlers from a button
 - [`light_sleep_gpio_wake.md`](light_sleep_gpio_wake.md): GPIO wakeup from auto light sleep with an LEDC wave that keeps running in sleep, and with an external wave and peripheral power-down on the ESP32-P4
@@ -59,3 +60,10 @@ One file per component, named after it:
 - [`buttons.md`](buttons.md): output button pad timing, homeassistant button through a raw API client with the wizard input, uart button on the UART0 loopback
 - [`rs485_frame.md`](rs485_frame.md): DLE/STX/ETX bus on an ESP32-C3 with a cross-wired simulated bus device (frame cases, gate timing)
 - [`hx711.md`](hx711.md): fake HX711 driven from the other core, every published value matched to the served conversion
+- [`automation_trace.md`](automation_trace.md): automation codegen A/B, a marker trace of chains, conditions, loops and script modes over the API
+- [`bluetooth_proxy.md`](bluetooth_proxy.md): held GATT link after a half-open API session, frozen Home Assistant stand-in
+- [`crash_report.md`](crash_report.md): crash buttons, fetching the previous boot's crash report over the API, per-chip abort facts
+- [`https_idf.md`](https_idf.md): web_server_idf HTTPS test component, listener switch, stalled TLS clients, bad key
+- [`mdns.md`](mdns.md): legacy unicast mDNS dump, hammer and latency straight to the device
+- [`sim_buses.md`](sim_buses.md): PCF8574/HD44780, MAX7219, SPI spy, packet_interface and SN74HC165 simulators, status LED probe, fake Home Assistant, cg.static_buffer probes
+- [`sigma_delta.md`](sigma_delta.md): pulse density of the sigma_delta speaker pin read inside the ESP32-P4, rtttl note onset and release
