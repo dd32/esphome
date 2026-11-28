@@ -157,8 +157,8 @@ class BME68xBSEC2Component : public Component {
   SampleRate pressure_sample_rate_{SAMPLE_RATE_DEFAULT};
   SampleRate humidity_sample_rate_{SAMPLE_RATE_DEFAULT};
 
-  uint8_t bsec_instance_[BSEC_INSTANCE_SIZE];
-  uint8_t op_mode_;  // operating mode of sensor
+  alignas(4) uint8_t bsec_instance_[BSEC_INSTANCE_SIZE];  // Causes rp2040 to crash when not aligned
+  uint8_t op_mode_;                                       // operating mode of sensor
   int8_t bme68x_status_{BME68X_OK};
   bool bsec2_blob_configured_{false};
 };
