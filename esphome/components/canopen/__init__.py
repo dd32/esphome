@@ -34,6 +34,7 @@ DEPENDENCIES = ["canbus"]
 DOMAIN = "canopen"
 MULTI_CONF = True
 
+CONF_CANOPEN_ID = "canopen_id"
 CONF_NODE_ID = "node_id"
 CONF_HEARTBEAT_INTERVAL = "heartbeat_interval"
 CONF_HEARTBEAT_CLIENTS = "heartbeat_clients"
@@ -57,6 +58,7 @@ CANOPENNODE_VERSION = "4.1.0-esphome.2"
 
 ns = cg.esphome_ns.namespace("canopen")
 CANopenComponent = ns.class_("CANopenComponent", cg.Component)
+CANopenNode = ns.class_("CANopenNode")
 NMTState = ns.enum("NMTState", is_class=True)
 NodeEvent = ns.enum("NodeEvent", is_class=True)
 Emergency = ns.struct("Emergency")
@@ -81,6 +83,8 @@ class CANopenData:
     enabled: set[str] = field(default_factory=set)
     # canbus id -> the canopen nodes on it, in config order (to_code links them, see set_next_local())
     local_nodes: dict[str, list[MockObj]] = field(default_factory=dict)
+    # hubs with a register_node() heartbeat_timeout
+    monitoring_hubs: set[str] = field(default_factory=set)
 
 
 def _get_data() -> CANopenData:
@@ -132,24 +136,33 @@ _register_hb_client = cg.slot_list(
 
 
 def enable_node_monitor() -> None:
-    """Compile node monitoring (CANopenNode's heartbeat consumer) for heartbeat_clients, which registers each node
-    through _register_hb_client so the storage is sized. Without it the consumer isn't built."""
+    """Compile the heartbeat consumer; each node registers through _register_hb_client."""
     if not _enable_once("node_monitor"):
         return
     cg.add_define("USE_CANOPEN_NODE_MONITOR")
 
 
+def _monitor_node(hub: MockObj, node_id: int, timeout: cv.TimePeriod) -> None:
+    enable_node_monitor()
+    cg.add(_register_hb_client(hub, node_id, timeout.total_milliseconds))
+
+
 @coroutine_with_priority(CoroPriority.FINAL)
 async def _final_build_flags() -> None:
-    # after every hub's codegen: CANopenNode's port header enables the heartbeat consumer, which links in its code
-    # even without monitored nodes
+    # after all codegen, register_node() included: CANopenNode's port header enables the consumer otherwise
     if "node_monitor" not in _get_data().enabled:
         cg.add_build_flag("-DCO_CONFIG_HB_CONS=0")
     # each hub has its own consumer, so another hub's heartbeat_clients don't help
+    monitoring_hubs = _get_data().monitoring_hubs
     for hub in _hub_configs():
-        if CONF_ON_NODE_EVENT in hub and not hub.get(CONF_HEARTBEAT_CLIENTS):
+        if (
+            CONF_ON_NODE_EVENT in hub
+            and not hub.get(CONF_HEARTBEAT_CLIENTS)
+            and str(hub[CONF_ID]) not in monitoring_hubs
+        ):
             _LOGGER.warning(
-                "canopen %s: on_node_event never fires, this hub monitors no node (heartbeat_clients)",
+                "canopen %s: on_node_event never fires, this hub monitors no node (heartbeat_clients, or "
+                "register_node() with a heartbeat_timeout)",
                 hub[CONF_ID],
             )
 
@@ -161,6 +174,68 @@ def enable_nmt_master() -> None:
     cg.add_define("USE_CANOPEN_NMT_MASTER")
     # callback change | master
     cg.add_build_flag("-DCO_CONFIG_NMT=0x03")
+
+
+NODE_ID = cv.All(cv.int_, cv.Range(min=1, max=127))
+
+# config of a CANopenNode subclass, see register_node()
+CANOPEN_NODE_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(CONF_CANOPEN_ID): cv.use_id(CANopenComponent),
+        cv.Required(CONF_NODE_ID): NODE_ID,
+    }
+)
+
+
+def require_node_id(hub_id: ID, what: str) -> ConfigType:
+    """Final validation: hub_id must have a node_id. Returns the hub's config."""
+    hub = fv.get_declaring_config(hub_id)
+    if CONF_NODE_ID not in hub:
+        raise cv.Invalid(
+            f"{what} needs a CANopen node: canopen {hub_id} has no node_id (SDO client only)"
+        )
+    return hub
+
+
+def final_validate_canopen_node(config: ConfigType) -> ConfigType:
+    """FINAL_VALIDATE_SCHEMA for CANOPEN_NODE_SCHEMA."""
+    hub = require_node_id(config[CONF_CANOPEN_ID], "a canopen profile component")
+    if hub[CONF_NODE_ID] == config[CONF_NODE_ID]:
+        raise cv.Invalid(
+            f"node_id 0x{config[CONF_NODE_ID]:02X} is the own id of canopen {config[CONF_CANOPEN_ID]}",
+            path=[CONF_NODE_ID],
+        )
+    return config
+
+
+async def register_node(
+    var: MockObj,
+    config: ConfigType,
+    sdo: bool = False,
+    nmt: bool = False,
+    heartbeat_timeout: cv.TimePeriod | None = None,
+) -> None:
+    """Codegen for a CANopenNode subclass (CANOPEN_NODE_SCHEMA).
+
+    A heartbeat_timeout (1 to 65535 ms, UINT16_MS) monitors the node; with heartbeat_clients the shortest wins.
+    """
+    if (
+        heartbeat_timeout is not None
+        and not 1 <= heartbeat_timeout.total_milliseconds <= 65535
+    ):
+        raise EsphomeError(
+            f"canopen: the heartbeat_timeout of node 0x{config[CONF_NODE_ID]:02X} is "
+            f"{heartbeat_timeout.total_milliseconds} ms, it must be 1 to 65535 ms (validate it with canopen.UINT16_MS)"
+        )
+    cg.add_define("USE_CANOPEN_EMCY")
+    if sdo:
+        enable_sdo_client()
+    if nmt:
+        enable_nmt_master()
+    if heartbeat_timeout is not None:
+        _get_data().monitoring_hubs.add(str(config[CONF_CANOPEN_ID]))
+        hub = await cg.get_variable(config[CONF_CANOPEN_ID])
+        _monitor_node(hub, config[CONF_NODE_ID], heartbeat_timeout)
 
 
 CALLBACK_AUTOMATIONS = (
@@ -252,8 +327,6 @@ def validate_client_only(config: ConfigType) -> ConfigType:
     return {key: value for key, value in config.items() if key not in NODE_OPTIONS}
 
 
-NODE_ID = cv.All(cv.int_, cv.Range(min=1, max=127))
-
 HB_CLIENT_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_NODE_ID): NODE_ID,
@@ -266,7 +339,7 @@ def validate_heartbeat_clients(config: ConfigType) -> ConfigType:
     for client in config[CONF_HEARTBEAT_CLIENTS]:
         if client[CONF_NODE_ID] == config.get(CONF_NODE_ID):
             raise cv.Invalid(
-                f"heartbeat_clients: node_id {client[CONF_NODE_ID]} is this node's own id"
+                f"heartbeat_clients: node_id 0x{client[CONF_NODE_ID]:02X} is this node's own id"
             )
     return config
 
@@ -334,7 +407,7 @@ def _final_validate(config: ConfigType) -> ConfigType:
         # nodes on the same canbus receive each other's frames: their ids must differ, as on any CANopen bus
         if CONF_NODE_ID in config and other.get(CONF_NODE_ID) == config[CONF_NODE_ID]:
             raise cv.Invalid(
-                f"node_id {config[CONF_NODE_ID]} is also used by canopen {other[CONF_ID]} on the same canbus",
+                f"node_id 0x{config[CONF_NODE_ID]:02X} is also used by canopen {other[CONF_ID]} on the same canbus",
                 path=[CONF_NODE_ID],
             )
         # their SDO clients would use the same COB-IDs, and a reply would end both clients' requests
@@ -410,14 +483,8 @@ async def to_code(config: ConfigType) -> None:
     cg.add_optional(var.set_device_name, config.get(CONF_DEVICE_NAME))
     cg.add_optional(var.set_hardware_version, config.get(CONF_HARDWARE_VERSION))
     cg.add_optional(var.set_software_version, config.get(CONF_SOFTWARE_VERSION))
-    if config[CONF_HEARTBEAT_CLIENTS]:
-        enable_node_monitor()
     for client in config[CONF_HEARTBEAT_CLIENTS]:
-        cg.add(
-            _register_hb_client(
-                var, client[CONF_NODE_ID], client[CONF_TIMEOUT].total_milliseconds
-            )
-        )
+        _monitor_node(var, client[CONF_NODE_ID], client[CONF_TIMEOUT])
 
     await automation.build_callback_automations(var, config, CALLBACK_AUTOMATIONS)
 
